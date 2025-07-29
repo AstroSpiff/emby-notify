@@ -14,7 +14,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID   = os.getenv('TELEGRAM_CHAT_ID')
 TRAKT_API_KEY      = os.getenv('TRAKT_API_KEY')
 OMDB_API_KEY       = os.getenv('OMDB_API_KEY')
-TMDB_API_KEY       = os.getenv('TMDB_API_KEY')  # nuovo
+TMDB_API_KEY       = os.getenv('TMDB_API_KEY')
 
 # ————————————————
 # 📁 Cache file
@@ -29,6 +29,26 @@ def load_cache():
 
 def save_cache(cache):
     CACHE_PATH.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding='utf-8')
+
+# ————————————————
+# 📆 Parser robusto per DateCreated
+# ————————————————
+def parse_date_created(date_str):
+    if not date_str:
+        return None
+    # rimuovi eventuale 'Z' finale
+    if date_str.endswith('Z'):
+        date_str = date_str[:-1]
+    # tronca le frazioni a 6 decimali
+    if '.' in date_str:
+        base, frac = date_str.split('.', 1)
+        frac = ''.join(ch for ch in frac if ch.isdigit())
+        frac = (frac + '000000')[:6]  # assicura almeno 6 cifre
+        date_str = f"{base}.{frac}"
+    try:
+        return datetime.fromisoformat(date_str)
+    except ValueError:
+        return None
 
 # ————————————————
 # 🎞️ Fetch Emby items con DateCreated
@@ -75,13 +95,15 @@ def get_ratings(title, year):
         r = requests.get(f"https://api.trakt.tv/search/movie?query={q}&year={year}", headers=headers)
         if r.ok and r.json():
             trakt = r.json()[0].get('score','N/A')
-    except: pass
+    except:
+        pass
     try:
         q = requests.utils.quote(title)
         r = requests.get(f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={q}&y={year}")
         data = r.json()
         imdb = data.get('imdbRating','N/A')
-    except: pass
+    except:
+        pass
     return trakt, imdb
 
 # ————————————————
@@ -89,19 +111,20 @@ def get_ratings(title, year):
 # ————————————————
 def get_tmdb_info(title, year, is_series, season=None, episode=None):
     base = "https://api.themoviedb.org/3"
-    # search movie o tv
     kind = "tv" if is_series else "movie"
     params = {"api_key":TMDB_API_KEY, "query":title}
     if not is_series:
         params["year"] = year
     r = requests.get(f"{base}/search/{kind}", params=params)
-    if not r.ok: return None, None
+    if not r.ok:
+        return None, None
     results = r.json().get("results") or []
-    if not results: return None, None
+    if not results:
+        return None, None
     tmdb_id = results[0]["id"]
-    # dettagli
     det = requests.get(f"{base}/{kind}/{tmdb_id}", params={"api_key":TMDB_API_KEY})
-    if not det.ok: return None, None
+    if not det.ok:
+        return None, None
     data = det.json()
     poster = data.get("poster_path")
     overview = data.get("overview","")
@@ -114,12 +137,12 @@ def get_tmdb_info(title, year, is_series, season=None, episode=None):
 def send_telegram(photo_url, caption):
     if photo_url:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        data = {'chat_id':TELEGRAM_CHAT_ID,'caption':caption,'parse_mode':'HTML'}
-        files = {'photo':requests.get(photo_url).content}
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
+        files = {'photo': requests.get(photo_url).content}
         r = requests.post(url, data=data, files=files)
     else:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id':TELEGRAM_CHAT_ID,'text':caption,'parse_mode':'HTML'}
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'parse_mode': 'HTML'}
         r = requests.post(url, data=data)
     if not r.ok:
         print("Errore invio Telegram:", r.status_code, r.text)
@@ -133,10 +156,9 @@ def process():
     cutoff = datetime.utcnow() - timedelta(hours=24)
 
     for item in fetch_emby_items():
-        # data creazione
-        dt = datetime.fromisoformat(item.get('DateCreated').rstrip('Z'))
-        if dt < cutoff:
-            continue  # salta tutto ciò non aggiunto nelle ultime 24h
+        dt = parse_date_created(item.get('DateCreated'))
+        if not dt or dt < cutoff:
+            continue  # skip se più vecchio di 24h
 
         title = item.get('Name')
         year  = item.get('ProductionYear','')
@@ -144,14 +166,12 @@ def process():
         season    = item.get('ParentIndexNumber')
         episode   = item.get('IndexNumber')
 
-        # TMDb info
         poster_tmdb, overview_tmdb = get_tmdb_info(title, year, is_series, season, episode)
         overview = overview_tmdb or item.get('Overview','')[:400]
         poster_url = poster_tmdb
 
         trakt, imdb = get_ratings(title, year)
 
-        # processa ogni fonte media
         for src in item.get('MediaSources', []):
             key = build_key(item, src)
             entry = {
@@ -164,14 +184,10 @@ def process():
             }
             new_cache[key] = entry
             if cache.get(key) == entry:
-                continue  # già notificato
+                continue
 
-            # prepara lista risoluzioni per questo item
-            # (se è la prima fonte, header Nuovo; altrimenti consideralo aggiornamento)
             is_update = any(k.startswith(item['Id']+"__") for k in cache)
-            h = src.get('Height')
-            ch = src.get('Channels',2)
-            ra = f"{h}p ({format_audio(ch)})"
+            ra = f"{src.get('Height')}p ({format_audio(src.get('Channels',2))})"
 
             header = "<b>Aggiornamento</b>" if is_update else "<b>Nuovo</b>"
             caption  = f"{header}\n🎬 <b>{title}</b> ({year})\n"
