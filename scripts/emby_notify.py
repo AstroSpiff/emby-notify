@@ -3,6 +3,7 @@ import os
 import json
 import requests
 from pathlib import Path
+from datetime import datetime, timedelta
 
 # ————————————————
 # 📌 Variabili d’ambiente (da GitHub Secrets)
@@ -13,6 +14,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID   = os.getenv('TELEGRAM_CHAT_ID')
 TRAKT_API_KEY      = os.getenv('TRAKT_API_KEY')
 OMDB_API_KEY       = os.getenv('OMDB_API_KEY')
+TMDB_API_KEY       = os.getenv('TMDB_API_KEY')  # nuovo
 
 # ————————————————
 # 📁 Cache file
@@ -29,28 +31,28 @@ def save_cache(cache):
     CACHE_PATH.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding='utf-8')
 
 # ————————————————
-# 🎞️ Prendo tutti i Movie ed Episode da Emby
+# 🎞️ Fetch Emby items con DateCreated
 # ————————————————
 def fetch_emby_items():
     headers = {'X-Emby-Token': EMBY_API_KEY}
     params = {
         'IncludeItemTypes': 'Movie,Episode',
+        'Fields': 'MediaSources,Overview,ProductionYear,Name,ParentIndexNumber,IndexNumber,SeriesName,PrimaryImageTag,DateCreated',
         'Recursive': 'true',
-        'Limit': 100,
-        'Fields': 'MediaSources,Overview,ProductionYear,Name,ParentIndexNumber,IndexNumber,SeriesName,PrimaryImageTag'
+        'Limit': 100
     }
     r = requests.get(f"{EMBY_SERVER_URL}/emby/Items", headers=headers, params=params)
     r.raise_for_status()
     return r.json().get('Items', [])
 
 # ————————————————
-# 🔑 Chiave unica: combina ItemId + MediaSourceId
+# 🔑 Chiave unica: ItemId + MediaSourceId
 # ————————————————
 def build_key(item, src):
     return f"{item['Id']}__{src['Id']}"
 
 # ————————————————
-# 🔊 Audio format helper
+# 🔊 Formatta audio
 # ————————————————
 def format_audio(ch):
     if ch == 2: return '2.0'
@@ -59,133 +61,128 @@ def format_audio(ch):
     return f"{max(ch-1,1)}.1"
 
 # ————————————————
-# ⭐️ Recupera valutazioni Trakt e IMDb (via OMDb)
+# ⭐️ Valutazioni (Trakt + OMDb)
 # ————————————————
 def get_ratings(title, year):
-    trakt_rating = 'N/A'
-    imdb_rating = 'N/A'
-    # — Trakt —
+    trakt, imdb = 'N/A','N/A'
     try:
         headers = {
-            'Content-Type': 'application/json',
-            'trakt-api-version': '2',
-            'trakt-api-key': TRAKT_API_KEY
+            'Content-Type':'application/json',
+            'trakt-api-version':'2',
+            'trakt-api-key':TRAKT_API_KEY
         }
         q = requests.utils.quote(title)
         r = requests.get(f"https://api.trakt.tv/search/movie?query={q}&year={year}", headers=headers)
         if r.ok and r.json():
-            trakt_rating = r.json()[0].get('score', 'N/A')
-    except:
-        pass
-    # — IMDb via OMDb —
+            trakt = r.json()[0].get('score','N/A')
+    except: pass
     try:
         q = requests.utils.quote(title)
         r = requests.get(f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={q}&y={year}")
         data = r.json()
-        imdb_rating = data.get('imdbRating', 'N/A')
-    except:
-        pass
-    return trakt_rating, imdb_rating
+        imdb = data.get('imdbRating','N/A')
+    except: pass
+    return trakt, imdb
 
 # ————————————————
-# 📲 Invia notifica Telegram con foto + caption HTML
+# 🎥 TMDb: prendi poster + overview
+# ————————————————
+def get_tmdb_info(title, year, is_series, season=None, episode=None):
+    base = "https://api.themoviedb.org/3"
+    # search movie o tv
+    kind = "tv" if is_series else "movie"
+    params = {"api_key":TMDB_API_KEY, "query":title}
+    if not is_series:
+        params["year"] = year
+    r = requests.get(f"{base}/search/{kind}", params=params)
+    if not r.ok: return None, None
+    results = r.json().get("results") or []
+    if not results: return None, None
+    tmdb_id = results[0]["id"]
+    # dettagli
+    det = requests.get(f"{base}/{kind}/{tmdb_id}", params={"api_key":TMDB_API_KEY})
+    if not det.ok: return None, None
+    data = det.json()
+    poster = data.get("poster_path")
+    overview = data.get("overview","")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
+    return poster_url, overview
+
+# ————————————————
+# 📲 Invia Telegram (photo o testo)
 # ————————————————
 def send_telegram(photo_url, caption):
-    """
-    Se c'è un poster, manda sendPhoto, altrimenti sendMessage.
-    """
     if photo_url:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        data = {
-            'chat_id': TELEGRAM_CHAT_ID,
-            'caption': caption,
-            'parse_mode': 'HTML'
-        }
-        files = {'photo': requests.get(photo_url).content}
+        data = {'chat_id':TELEGRAM_CHAT_ID,'caption':caption,'parse_mode':'HTML'}
+        files = {'photo':requests.get(photo_url).content}
         r = requests.post(url, data=data, files=files)
     else:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {
-            'chat_id': TELEGRAM_CHAT_ID,
-            'text': caption,
-            'parse_mode': 'HTML'
-        }
+        data = {'chat_id':TELEGRAM_CHAT_ID,'text':caption,'parse_mode':'HTML'}
         r = requests.post(url, data=data)
-
     if not r.ok:
         print("Errore invio Telegram:", r.status_code, r.text)
 
 # ————————————————
-# 🔄 Processo principale: confronta cache e raggruppa per film
+# 🔄 Processo: filtra ultime 24h, confronta cache, notifica
 # ————————————————
 def process():
-    old_cache = load_cache()
-    old_keys = set(old_cache.keys())
+    cache = load_cache()
     new_cache = {}
+    cutoff = datetime.utcnow() - timedelta(hours=24)
 
-    items = fetch_emby_items()
-    for item in items:
-        # Dati comuni
-        title      = item.get('Name')
-        year       = item.get('ProductionYear','')
-        is_series  = bool(item.get('SeriesName'))
-        season     = item.get('ParentIndexNumber')
-        episode    = item.get('IndexNumber')
-        overview   = item.get('Overview','')[:400]
-        tag        = item.get('PrimaryImageTag')
-        poster_url = (f"{EMBY_SERVER_URL}/emby/Items/{item['Id']}/Images/Primary?tag={tag}"
-                      if tag else None)
-        trakt_rating, imdb_rating = get_ratings(title, year)
+    for item in fetch_emby_items():
+        # data creazione
+        dt = datetime.fromisoformat(item.get('DateCreated').rstrip('Z'))
+        if dt < cutoff:
+            continue  # salta tutto ciò non aggiunto nelle ultime 24h
 
-        # Raccogli le chiavi di tutte le sorgenti media per questo item
-        item_keys = []
-        src_map   = {}
+        title = item.get('Name')
+        year  = item.get('ProductionYear','')
+        is_series = bool(item.get('SeriesName'))
+        season    = item.get('ParentIndexNumber')
+        episode   = item.get('IndexNumber')
+
+        # TMDb info
+        poster_tmdb, overview_tmdb = get_tmdb_info(title, year, is_series, season, episode)
+        overview = overview_tmdb or item.get('Overview','')[:400]
+        poster_url = poster_tmdb
+
+        trakt, imdb = get_ratings(title, year)
+
+        # processa ogni fonte media
         for src in item.get('MediaSources', []):
             key = build_key(item, src)
-            item_keys.append(key)
-            src_map[key] = src
-            # Prepara il nuovo cache entry
-            new_cache[key] = {
-                'Name':        title,
-                'Year':        year,
-                'SourceId':    src.get('Id'),
-                'Height':      src.get('Height'),
-                'Channels':    src.get('Channels'),
-                'BitRate':     src.get('BitRate')
+            entry = {
+                'Name': title,
+                'Year': year,
+                'SourceId': src.get('Id'),
+                'Height': src.get('Height'),
+                'Channels': src.get('Channels'),
+                'BitRate': src.get('BitRate')
             }
+            new_cache[key] = entry
+            if cache.get(key) == entry:
+                continue  # già notificato
 
-        # Trova quali sorgenti sono nuove
-        new_keys = [k for k in item_keys if k not in old_keys]
-        if not new_keys:
-            continue
+            # prepara lista risoluzioni per questo item
+            # (se è la prima fonte, header Nuovo; altrimenti consideralo aggiornamento)
+            is_update = any(k.startswith(item['Id']+"__") for k in cache)
+            h = src.get('Height')
+            ch = src.get('Channels',2)
+            ra = f"{h}p ({format_audio(ch)})"
 
-        # Determina se è un film/episodio del tutto nuovo, o un aggiornamento
-        old_keys_item = [k for k in item_keys if k in old_keys]
-        is_update     = bool(old_keys_item)
+            header = "<b>Aggiornamento</b>" if is_update else "<b>Nuovo</b>"
+            caption  = f"{header}\n🎬 <b>{title}</b> ({year})\n"
+            if is_series:
+                caption += f"Stagione {season}, Episodio {episode}\n"
+            caption += f"📽 Risoluzione: {ra}\n\n"
+            caption += f"📝 {overview}...\n\n"
+            caption += f"⭐ Trakt: {trakt}\n⭐ IMDb: {imdb}"
 
-        # Costruisci la lista "1080p (2.0), 2160p (5.1)"
-        ra_list = []
-        for k in new_keys:
-            src = src_map[k]
-            h   = src.get('Height')
-            ch  = src.get('Channels', 2)
-            ra_list.append(f"{h}p ({format_audio(ch)})")
-        ra_str = ", ".join(ra_list)
+            send_telegram(poster_url, caption)
 
-        # Prepara caption
-        header = "<b>Aggiornamento</b>" if is_update else "<b>Nuovo</b>"
-        caption  = f"{header}\n"
-        caption += f"🎬 <b>{title}</b> ({year})\n"
-        if is_series:
-            caption += f"Stagione {season}, Episodio {episode}\n"
-        caption += f"📽 Risoluzioni: {ra_str}\n\n"
-        caption += f"📝 {overview}...\n\n"
-        caption += f"⭐ Trakt: {trakt_rating}\n"
-        caption += f"⭐ IMDb: {imdb_rating}"
-
-        send_telegram(poster_url, caption)
-
-    # Salva cache aggiornata
     save_cache(new_cache)
 
 if __name__ == '__main__':
