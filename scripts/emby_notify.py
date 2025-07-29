@@ -1,152 +1,138 @@
-#!/usr/bin/env python3
 import os
 import json
-from datetime import datetime, timedelta
+import re
 import requests
-import telegram
+from datetime import datetime, timedelta
+from dateutil import tz
 
-# --- CONFIGURAZIONE DA ENV ---
-EMBY_SERVER_URL   = os.getenv("EMBY_SERVER_URL")
-EMBY_API_KEY      = os.getenv("EMBY_API_KEY")
-EMBY_USER_ID      = os.getenv("EMBY_USER_ID")      # assicurati di averlo a disposizione
-TELEGRAM_BOT_TOKEN= os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID")
-TMDB_API_KEY      = os.getenv("TMDB_API_KEY")
+# --- Parametri da env ---
+EMBY_SERVER_URL = os.environ['EMBY_SERVER_URL'].rstrip('/')
+EMBY_API_KEY    = os.environ['EMBY_API_KEY']
+TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
+TELEGRAM_CHAT_ID   = os.environ['TELEGRAM_CHAT_ID']
+TMDB_API_KEY       = os.environ['TMDB_API_KEY']
 
-CACHE_PATH = "data/cache.json"
+CACHE_FILE = 'data/cache.json'
 
+# --- Helpers ---
+
+def parse_emby_date(dt_str):
+    """Converti '2024-12-13T07:00:05.0000000' in datetime UTC."""
+    # rimuovi 'Z' finale
+    s = dt_str.rstrip('Z')
+    # tronca microsecondi a max 6 cifre
+    if '.' in s:
+        main, frac = s.split('.', 1)
+        frac = re.match(r'(\d{1,6})', frac).group(1)
+        s = f"{main}.{frac}"
+    return datetime.fromisoformat(s)
+
+def get_movie_info_tmdb(title):
+    """Prende locandina e trama da TMDb."""
+    search = requests.get(
+        'https://api.themoviedb.org/3/search/movie',
+        params={'api_key': TMDB_API_KEY, 'query': title}
+    ).json().get('results', [])
+    if not search:
+        return None, None
+    movie = search[0]
+    details = requests.get(
+        f"https://api.themoviedb.org/3/movie/{movie['id']}",
+        params={'api_key': TMDB_API_KEY}
+    ).json()
+    poster = details.get('poster_path')
+    if poster:
+        poster = f"https://image.tmdb.org/t/p/w500{poster}"
+    return poster, details.get('overview')
+
+def send_telegram(text, photo_url=None):
+    """Invia testo (e foto opzionale) via Bot API con requests."""
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
+    if photo_url:
+        data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'caption': text,
+            'parse_mode': 'Markdown'
+        }
+        requests.post(base + 'sendPhoto', data=data, params={'photo': photo_url})
+    else:
+        json_payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': text,
+            'parse_mode': 'Markdown'
+        }
+        requests.post(base + 'sendMessage', json=json_payload)
 
 def load_cache():
-    try:
-        with open(CACHE_PATH, "r") as f:
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return []
 
+def save_cache(items):
+    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
 
-def save_cache(cache):
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f, indent=2)
+# --- Main ---
 
+def process():
+    # Carica cache e lista correntemente su Emby
+    old_items = load_cache()
+    resp = requests.get(f"{EMBY_SERVER_URL}/emby/Items", params={
+        'api_key': EMBY_API_KEY,
+        'Recursive': True,
+        'IncludeItemTypes': 'Movie',
+        'Fields': 'MediaSources,DateCreated'
+    }).json()
+    all_items = resp.get('Items', [])
 
-def fetch_emby_items():
-    url = f"{EMBY_SERVER_URL}/emby/Users/{EMBY_USER_ID}/Items"
-    params = {
-        "Recursive": "true",
-        "IncludeItemTypes": "Movie",
-        "IsHidden": "false",
-        # chiediamo anche DateAdded e MediaSources
-        "Fields": "DateAdded,MediaSources"
-    }
-    headers = {"X-Emby-Token": EMBY_API_KEY}
-    r = requests.get(url, params=params, headers=headers)
-    r.raise_for_status()
-    return r.json().get("Items", [])
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=1)
 
+    # costruisci mappa titolo->set(risoluzioni)
+    def build_map(items):
+        d = {}
+        for i in items:
+            title = i.get('Name')
+            dt = parse_emby_date(i['DateCreated'])
+            # estrai risoluzione: primo VideoStream disponibile
+            vs = i.get('MediaSources', [{}])[0].get('VideoStreams', [])
+            if vs:
+                res = f"{vs[0].get('Height')}p"
+            else:
+                res = 'Unknown'
+            d.setdefault(title, set()).add((res, dt))
+        return d
 
-def get_tmdb_info(title, year):
-    """Cerca il film su TMDB e restituisce (poster_url, overview)."""
-    search_url = "https://api.themoviedb.org/3/search/movie"
-    params = {
-        "api_key": TMDB_API_KEY,
-        "query": title,
-        "year": year or "",
-        "language": "it-IT"
-    }
-    r = requests.get(search_url, params=params)
-    if not r.ok:
-        return None, None
-    data = r.json().get("results") or []
-    if not data:
-        return None, None
-    m = data[0]
-    poster = m.get("poster_path")
-    poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
-    overview = m.get("overview")
-    return poster_url, overview
+    old_map = build_map(old_items)
+    new_map = build_map(all_items)
 
-
-def main():
-    cache = load_cache()
-    cutoff = datetime.utcnow() - timedelta(hours=24)
-
-    new_movies = []
-    updated_movies = []
-
-    items = fetch_emby_items()
-    for item in items:
-        item_id = item["Id"]
-        # Emby ti restituisce la data in ISO con 'Z'
-        date_added = item.get("DateAdded")
-        if not date_added:
+    # notifiche
+    for title, infos in new_map.items():
+        # filtra solo le versioni create <24h
+        recent = {res for res, dt in infos if dt >= cutoff}
+        if not recent:
             continue
-        dt_added = datetime.fromisoformat(date_added.rstrip("Z"))
 
-        # lista di ID dei media sources (una per risoluzione/versione)
-        media_sources = item.get("MediaSources", [])
-        src_ids = [src["Id"] for src in media_sources]
-
-        if item_id not in cache:
-            # nuovo film
-            if dt_added > cutoff:
-                new_movies.append((item, media_sources))
-            # aggiungo comunque al cache
-            cache[item_id] = src_ids
+        old_res = {r for r, _ in old_map.get(title, set())}
+        if title not in old_map:
+            # FILM NUOVO
+            poster, plot = get_movie_info_tmdb(title)
+            txt = f"*Nuovo film:* _{title}_\nRisoluzioni: {', '.join(sorted(recent))}"
+            if plot:
+                txt += f"\n\n{plot}"
+            send_telegram(txt, photo_url=poster)
         else:
-            # già visto: controllo se ci sono nuove versioni
-            old_src = set(cache[item_id])
-            added = [s for s in media_sources if s["Id"] not in old_src]
+            # AGGIORNAMENTO (nuove risoluzioni)
+            added = recent - old_res
             if added:
-                updated_movies.append((item, added))
-                # aggiorno il cache
-                cache[item_id] = src_ids
+                poster, _ = get_movie_info_tmdb(title)
+                txt = f"*Aggiornato:* _{title}_\nNuove risoluzioni: {', '.join(sorted(added))}"
+                send_telegram(txt, photo_url=poster)
 
-    save_cache(cache)
+    # salva l'intera lista per il prossimo giro
+    save_cache(all_items)
 
-    # inizializzo Telegram
-    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
-
-    # notifichiamo i nuovi film
-    for item, media_sources in new_movies:
-        title = item.get("Name")
-        year  = item.get("ProductionYear")
-        poster_url, overview = get_tmdb_info(title, year)
-
-        caption = f"🎬 *Nuovo film:* {title} ({year})"
-        if overview:
-            caption += f"\n\n_{overview}_"
-
-        if poster_url:
-            bot.send_photo(
-                chat_id=TELEGRAM_CHAT_ID,
-                photo=poster_url,
-                caption=caption,
-                parse_mode="Markdown"
-            )
-        else:
-            bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=caption,
-                parse_mode="Markdown"
-            )
-
-    # notifichiamo gli aggiornamenti di risoluzione
-    for item, added_sources in updated_movies:
-        title = item.get("Name")
-        year  = item.get("ProductionYear")
-        qualities = sorted({ f"{s.get('Width')}p" for s in added_sources })
-
-        text = (
-            f"🔄 *{title}* ({year})\n"
-            f"Nuove risoluzioni aggiunte: {', '.join(qualities)}"
-        )
-        bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="Markdown"
-        )
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    process()
