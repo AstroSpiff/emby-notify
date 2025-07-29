@@ -141,19 +141,19 @@ def send_telegram(txt, photo_url=None):
 # ─── CACHE ──────────────────────────────────────────────────────────────────────
 
 def load_cache():
-    """Restituisce dict {movies: {titolo: [risoluzioni]}, episodes: {serie: {stagione: [episodi]}}}"""
+    """Carica la cache come {'movies': {...}, 'episodes': {...}}; reinizializza se formato sbagliato."""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            print("⚠️ Cache corrotta: inizializzo vuota")
+                c = json.load(f)
+            # deve essere dict con le due chiavi
+            if not isinstance(c, dict) or 'movies' not in c or 'episodes' not in c:
+                raise ValueError("Formato cache non valido")
+            return c
+        except Exception as e:
+            print(f"⚠️ Cache corrotta o formato invalido ({e}), la reinizializzo vuota")
+    # default
     return {'movies': {}, 'episodes': {}}
-
-def save_cache(c):
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE,'w',encoding='utf-8') as f:
-        json.dump(c, f, ensure_ascii=False, indent=2)
 
 # ─── MAIN ───────────────────────────────────────────────────────────────────────
 
