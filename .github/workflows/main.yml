@@ -15,6 +15,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
       TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
+      TRAKT_API_KEY:      ${{ secrets.TRAKT_API_KEY }}
 
     steps:
       - uses: actions/checkout@v3
