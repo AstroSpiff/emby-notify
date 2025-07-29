@@ -17,19 +17,16 @@ TELEGRAM_CHAT_ID   = os.environ['TELEGRAM_CHAT_ID']
 TMDB_API_KEY       = os.environ['TMDB_API_KEY']
 TRAKT_API_KEY      = os.environ['TRAKT_API_KEY']
 
-CACHE_FILE    = 'data/cache.json'
-HEADERS       = {'Accept': 'application/json'}
-TIMEOUT_EMBY  = (5, 60)   # connect=5s, read=60s
-TIMEOUT_OTHER = 10
+CACHE_FILE   = 'data/cache.json'
+HEADERS      = {'Accept': 'application/json'}
+TIMEOUT_EMBY = (5, 30)
+TIMEOUT_OTHER= 10
 
 # ─── SESSION CON RETRY ───────────────────────────────────────────────────────────
 session = requests.Session()
-retries = Retry(
-    total=5,
-    backoff_factor=0.3,
-    status_forcelist=[500, 502, 503, 504],
-    allowed_methods=["GET", "POST"]
-)
+retries = Retry(total=5, backoff_factor=0.3,
+                status_forcelist=[500,502,503,504],
+                allowed_methods=["GET","POST"])
 adapter = HTTPAdapter(max_retries=retries)
 session.mount('http://', adapter)
 session.mount('https://', adapter)
@@ -45,288 +42,249 @@ def parse_emby_date(dt_str):
     return datetime.fromisoformat(s)
 
 def get_movie_info_tmdb(title):
-    """(poster_url, trama) in italiano → fallback inglese."""
+    """(poster, trama) in italiano→fallback inglese."""
     try:
-        r = session.get(
-            'https://api.themoviedb.org/3/search/movie',
-            params={'api_key': TMDB_API_KEY, 'query': title, 'language': 'it-IT'},
-            headers=HEADERS, timeout=TIMEOUT_OTHER
-        )
+        r = session.get('https://api.themoviedb.org/3/search/movie',
+                        params={'api_key':TMDB_API_KEY,'query':title,'language':'it-IT'},
+                        headers=HEADERS, timeout=TIMEOUT_OTHER)
         r.raise_for_status()
-        results = r.json().get('results', [])
-        if not results:
-            return None, None
+        results = r.json().get('results',[])
+        if not results: return None, None
         movie = results[0]
-        d = session.get(
-            f"https://api.themoviedb.org/3/movie/{movie['id']}",
-            params={'api_key': TMDB_API_KEY, 'language': 'it-IT'},
-            headers=HEADERS, timeout=TIMEOUT_OTHER
-        )
+        d = session.get(f"https://api.themoviedb.org/3/movie/{movie['id']}",
+                        params={'api_key':TMDB_API_KEY,'language':'it-IT'},
+                        headers=HEADERS, timeout=TIMEOUT_OTHER)
         d.raise_for_status()
         details = d.json()
-        overview = details.get('overview') or ''
+        overview = details.get('overview','') or ''
         if not overview.strip():
-            e = session.get(
-                f"https://api.themoviedb.org/3/movie/{movie['id']}",
-                params={'api_key': TMDB_API_KEY, 'language': 'en-US'},
-                headers=HEADERS, timeout=TIMEOUT_OTHER
-            )
+            e = session.get(f"https://api.themoviedb.org/3/movie/{movie['id']}",
+                            params={'api_key':TMDB_API_KEY,'language':'en-US'},
+                            headers=HEADERS, timeout=TIMEOUT_OTHER)
             e.raise_for_status()
-            overview = e.json().get('overview')
+            overview = e.json().get('overview','')
         poster = details.get('poster_path')
-        if poster:
-            poster = f"https://image.tmdb.org/t/p/w500{poster}"
+        if poster: poster = f"https://image.tmdb.org/t/p/w500{poster}"
         return poster, overview
     except Exception as e:
-        print(f"⚠️ Errore TMDb per film '{title}': {e}")
+        print(f"⚠️ Errore TMDb film '{title}': {e}")
         return None, None
 
 def get_series_info_tmdb(title):
-    """(poster_url, trama) di una serie TV in italiano → fallback inglese."""
+    """(poster, trama) serie TV in italiano→fallback inglese."""
     try:
-        r = session.get(
-            'https://api.themoviedb.org/3/search/tv',
-            params={'api_key': TMDB_API_KEY, 'query': title, 'language': 'it-IT'},
-            headers=HEADERS, timeout=TIMEOUT_OTHER
-        )
+        r = session.get('https://api.themoviedb.org/3/search/tv',
+                        params={'api_key':TMDB_API_KEY,'query':title,'language':'it-IT'},
+                        headers=HEADERS, timeout=TIMEOUT_OTHER)
         r.raise_for_status()
-        results = r.json().get('results', [])
-        if not results:
-            return None, None
+        results = r.json().get('results',[])
+        if not results: return None, None
         show = results[0]
-        d = session.get(
-            f"https://api.themoviedb.org/3/tv/{show['id']}",
-            params={'api_key': TMDB_API_KEY, 'language': 'it-IT'},
-            headers=HEADERS, timeout=TIMEOUT_OTHER
-        )
+        d = session.get(f"https://api.themoviedb.org/3/tv/{show['id']}",
+                        params={'api_key':TMDB_API_KEY,'language':'it-IT'},
+                        headers=HEADERS, timeout=TIMEOUT_OTHER)
         d.raise_for_status()
         details = d.json()
-        overview = details.get('overview') or ''
+        overview = details.get('overview','') or ''
         if not overview.strip():
-            e = session.get(
-                f"https://api.themoviedb.org/3/tv/{show['id']}",
-                params={'api_key': TMDB_API_KEY, 'language': 'en-US'},
-                headers=HEADERS, timeout=TIMEOUT_OTHER
-            )
+            e = session.get(f"https://api.themoviedb.org/3/tv/{show['id']}",
+                            params={'api_key':TMDB_API_KEY,'language':'en-US'},
+                            headers=HEADERS, timeout=TIMEOUT_OTHER)
             e.raise_for_status()
-            overview = e.json().get('overview')
+            overview = e.json().get('overview','')
         poster = details.get('poster_path')
-        if poster:
-            poster = f"https://image.tmdb.org/t/p/w500{poster}"
+        if poster: poster = f"https://image.tmdb.org/t/p/w500{poster}"
         return poster, overview
     except Exception as e:
-        print(f"⚠️ Errore TMDb per serie '{title}': {e}")
+        print(f"⚠️ Errore TMDb serie '{title}': {e}")
         return None, None
 
-def get_rating_trakt(title, kind='movie'):
-    """Voto medio Trakt (0–10) arrotondato a 1 decimale per film o serie."""
-    headers = {
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_API_KEY
-    }
-    endpoint = 'movie' if kind=='movie' else 'show'
-    search_url = f"https://api.trakt.tv/search/{endpoint}"
-    ids_key = 'movie' if kind=='movie' else 'show'
+def get_trakt_rating(title, kind='movie'):
+    """Voto medio Trakt (0–10) per film o serie."""
+    hdr = {'Content-Type':'application/json',
+           'trakt-api-version':'2',
+           'trakt-api-key':TRAKT_API_KEY}
+    ep = 'movie' if kind=='movie' else 'show'
     try:
-        r = session.get(
-            search_url,
-            params={'query': title, 'limit': 1},
-            headers=headers, timeout=TIMEOUT_OTHER
-        )
+        r = session.get(f"https://api.trakt.tv/search/{ep}",
+                        params={'query':title,'limit':1},
+                        headers=hdr, timeout=TIMEOUT_OTHER)
         r.raise_for_status()
         data = r.json()
-        if not data:
-            return None
-        slug = data[0][ids_key]['ids']['slug']
-        r2 = session.get(
-            f"https://api.trakt.tv/{ids_key}s/{slug}/ratings",
-            headers=headers, timeout=TIMEOUT_OTHER
-        )
+        if not data: return None
+        slug = data[0][ep]['ids']['slug']
+        r2 = session.get(f"https://api.trakt.tv/{ep}s/{slug}/ratings",
+                         headers=hdr, timeout=TIMEOUT_OTHER)
         r2.raise_for_status()
         rating = r2.json().get('rating')
         return round(rating,1) if rating is not None else None
     except Exception as e:
-        print(f"⚠️ Errore Trakt per {kind} '{title}': {e}")
+        print(f"⚠️ Errore Trakt {kind} '{title}': {e}")
         return None
 
-def send_telegram(text, photo_url=None):
+def send_telegram(txt, photo_url=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
     try:
         if photo_url:
-            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': text, 'parse_mode': 'Markdown'}
-            resp = session.post(base + 'sendPhoto', params={'photo': photo_url}, data=data, timeout=TIMEOUT_OTHER)
+            data = {'chat_id':TELEGRAM_CHAT_ID,'caption':txt,'parse_mode':'Markdown'}
+            resp = session.post(base+'sendPhoto', params={'photo':photo_url},
+                                data=data, timeout=TIMEOUT_OTHER)
         else:
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}
-            resp = session.post(base + 'sendMessage', json=payload, timeout=TIMEOUT_OTHER)
+            payload = {'chat_id':TELEGRAM_CHAT_ID,'text':txt,'parse_mode':'Markdown'}
+            resp = session.post(base+'sendMessage', json=payload,
+                                timeout=TIMEOUT_OTHER)
         if not resp.ok:
-            print(f"⚠️ Errore invio Telegram: {resp.status_code} {resp.text}")
+            print(f"⚠️ Telegram error: {resp.status_code} {resp.text}")
     except Exception as e:
-        print(f"⚠️ Exception invio Telegram: {e}")
+        print(f"⚠️ Exception Telegram: {e}")
+
+# ─── CACHE ──────────────────────────────────────────────────────────────────────
 
 def load_cache():
+    """Restituisce dict {movies: {titolo: [risoluzioni]}, episodes: {serie: {stagione: [episodi]}}}"""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, encoding='utf-8') as f:
-                txt = f.read().strip()
-                return json.loads(txt) if txt else []
+                return json.load(f)
         except json.JSONDecodeError:
-            print("⚠️ Cache corrotta, reinizializzo a vuoto")
-            return []
-    return []
+            print("⚠️ Cache corrotta: inizializzo vuota")
+    return {'movies': {}, 'episodes': {}}
 
-def save_cache(items):
+def save_cache(c):
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    with open(CACHE_FILE,'w',encoding='utf-8') as f:
+        json.dump(c, f, ensure_ascii=False, indent=2)
 
-def build_movie_map(items):
-    m = {}
-    for i in items:
-        if i.get('Type') != 'Movie': continue
-        title = i.get('Name')
-        try:
-            dt = parse_emby_date(i['DateCreated'])
-        except: continue
-        path = i.get('Path','') or ''
-        match = re.search(r'(\d{3,4}p)', path)
-        if match:
-            res = match.group(1)
-        else:
-            vs = i.get('MediaSources',[{}])[0].get('VideoStreams',[])
-            res = f"{vs[0].get('Height')}p" if vs else 'Unknown'
-        m.setdefault(title, set()).add((res, dt))
-    return m
-
-def build_series_map(items):
-    m = {}
-    for i in items:
-        if i.get('Type') != 'Episode': continue
-        title = i.get('SeriesName')
-        try:
-            dt = parse_emby_date(i['DateCreated'])
-        except: continue
-        s = i.get('ParentIndexNumber'); e = i.get('IndexNumber')
-        if title is None or s is None or e is None: continue
-        m.setdefault(title, set()).add((s, e, dt))
-    return m
+# ─── MAIN ───────────────────────────────────────────────────────────────────────
 
 def process():
-    old_items         = load_cache()
-    old_movies        = [i for i in old_items if i.get('Type')=='Movie']
-    old_episodes      = [i for i in old_items if i.get('Type')=='Episode']
+    cache = load_cache()
+    old_movies   = {t:set(rs) for t,rs in cache['movies'].items()}
+    old_episodes = {s:{int(se):set(eps) for se,eps in seasons.items()}
+                    for s,seasons in cache['episodes'].items()}
 
-    # ─── Fetch FILM (tutta la libreria) ───────────────────
-    try:
-        r = session.get(
-            f"{EMBY_SERVER_URL}/emby/Items",
-            params={
-                'api_key': EMBY_API_KEY,
-                'Recursive': True,
-                'IncludeItemTypes': 'Movie',
-                'Fields': 'MediaSources,DateCreated,Path'
-            },
-            headers=HEADERS,
-            timeout=TIMEOUT_EMBY
-        )
-        r.raise_for_status()
-        new_movies = r.json().get('Items', [])
-    except Exception as e:
-        print(f"⚠️ Errore Emby (Movie fetch): {e}")
-        new_movies = []
-
-    # ─── Fetch EPISODI recenti via /Items/Latest ──────────
-    try:
-        r2 = session.get(
-            f"{EMBY_SERVER_URL}/emby/Items/Latest",
-            params={
-                'api_key': EMBY_API_KEY,
-                'IncludeItemTypes': 'Episode',
-                'Fields': 'DateCreated,SeriesName,ParentIndexNumber,IndexNumber',
-                'Limit': 200
-            },
-            headers=HEADERS,
-            timeout=TIMEOUT_EMBY
-        )
-        r2.raise_for_status()
-        new_episodes = r2.json().get('Items', [])
-    except Exception as e:
-        print(f"⚠️ Errore Emby (Episode fetch): {e}")
-        new_episodes = []
-
+    # solo ultimi 48h
     now    = datetime.utcnow()
-    cutoff = now - timedelta(days=1)
+    cutoff = now - timedelta(hours=48)
 
-    # ─── Mappe per confronto ───────────────────────────────
-    old_movie_map  = build_movie_map(old_movies)
-    new_movie_map  = build_movie_map(new_movies)
-    old_series_map = build_series_map(old_episodes)
-    new_series_map = build_series_map(new_episodes)
+    # fetch unificato
+    try:
+        r = session.get(f"{EMBY_SERVER_URL}/emby/Items/Latest",
+                        params={
+                          'api_key':EMBY_API_KEY,
+                          'IncludeItemTypes':'Movie,Episode',
+                          'Fields':'MediaSources,DateCreated,Path,SeriesName,ParentIndexNumber,IndexNumber',
+                          'Limit':200
+                        },
+                        headers=HEADERS, timeout=TIMEOUT_EMBY)
+        r.raise_for_status()
+        items = r.json().get('Items',[])
+    except Exception as e:
+        print(f"⚠️ Errore Emby /Items/Latest: {e}")
+        return
 
-    # ─── NOTIFICHE FILM ───────────────────────────────────
-    for title, infos in new_movie_map.items():
-        recent = {r for (r, dt) in infos if dt >= cutoff}
-        if not recent: continue
-        old_res = {r for (r, _) in old_movie_map.get(title,())}
+    # raccogli i nuovi film/episodi in 48h
+    new_movies = defaultdict(set)
+    new_episodes = defaultdict(lambda: defaultdict(set))
+
+    for i in items:
+        try:
+            dt = parse_emby_date(i['DateCreated'])
+        except:
+            continue
+        if dt < cutoff: 
+            continue
+
+        if i.get('Type')=='Movie':
+            # estrai risoluzione
+            path = i.get('Path','') or ''
+            m = re.search(r'(\d{3,4}p)', path)
+            if m:
+                res = m.group(1)
+            else:
+                vs = i.get('MediaSources',[{}])[0].get('VideoStreams',[])
+                res = f"{vs[0].get('Height')}p" if vs else 'Unknown'
+            new_movies[i['Name']].add(res)
+
+        elif i.get('Type')=='Episode':
+            serie = i.get('SeriesName')
+            s = i.get('ParentIndexNumber')
+            e = i.get('IndexNumber')
+            if serie and s is not None and e is not None:
+                new_episodes[serie][str(s)].add(e)
+
+    # ─── NOTIFICHE FILM ─────────────────────────────────────────────
+    for title, rec_res in new_movies.items():
+        old_res = old_movies.get(title, set())
         poster, plot = get_movie_info_tmdb(title)
-        rating = get_rating_trakt(title, kind='movie')
-        if title not in old_movie_map:
+        rating = get_trakt_rating(title,'movie')
+
+        if title not in old_res:
+            # Nuovo film
             txt = f"*Nuovo film:* _{title}_"
             if rating: txt += f" (⭐ {rating}/10)"
-            txt += f"\nRisoluzioni: {', '.join(sorted(recent))}"
+            txt += f"\nRisoluzioni: {', '.join(sorted(rec_res))}"
             if plot: txt += f"\n\n{plot}"
             send_telegram(txt, photo_url=poster)
         else:
-            added = recent - old_res
+            # Aggiornamento film
+            added = rec_res - old_res
             if added:
                 txt = f"*Aggiornamento film:* _{title}_"
                 if rating: txt += f" (⭐ {rating}/10)"
                 txt += f"\nNuove risoluzioni: {', '.join(sorted(added))}"
                 send_telegram(txt, photo_url=poster)
 
-    # ─── NOTIFICHE SERIE TV ───────────────────────────────
-    for title, infos in new_series_map.items():
-        recent_eps = {(s,e) for (s,e,dt) in infos if dt >= cutoff}
-        if not recent_eps: continue
-        old_eps = {(s,e) for (s,e,_) in old_series_map.get(title,())}
-        poster, plot = get_series_info_tmdb(title)
-        rating = get_rating_trakt(title, kind='series')
-        if title not in old_series_map:
-            txt = f"*Nuova Serie TV:* _{title}_"
+        # aggiorna cache
+        cache['movies'].setdefault(title, [])
+        cache['movies'][title] = sorted(set(cache['movies'][title]) | rec_res)
+
+    # ─── NOTIFICHE SERIE TV ───────────────────────────────────────────
+    for serie, seasons in new_episodes.items():
+        old_seasons = old_episodes.get(serie, {})
+        poster, plot = get_series_info_tmdb(serie)
+        rating = get_trakt_rating(serie,'series')
+
+        if serie not in old_seasons:
+            # Nuova Serie TV
+            txt = f"*Nuova Serie TV:* _{serie}_"
             if rating: txt += f" (⭐ {rating}/10)"
-            eps_list = sorted(recent_eps)
-            txt += "\nEpisodi: " + ", ".join(f"S{s}E{e}" for s,e in eps_list)
+            eps_list = []
+            for se, eps in seasons.items():
+                for ep in eps:
+                    eps_list.append(f"S{se}E{ep}")
+            txt += "\nEpisodi: " + ", ".join(sorted(eps_list))
             if plot: txt += f"\n\n{plot}"
             send_telegram(txt, photo_url=poster)
         else:
-            added = recent_eps - old_eps
-            if added:
-                seasons = defaultdict(list)
-                for s,e in added: seasons[s].append(e)
-                txt = f"*Aggiornamento Serie TV:* _{title}_"
+            # Aggiornamento Serie TV
+            added_eps = {}
+            for se, eps in seasons.items():
+                old_eps = old_seasons.get(int(se), set())
+                new_eps = eps - old_eps
+                if new_eps:
+                    added_eps[int(se)] = new_eps
+            if added_eps:
+                txt = f"*Aggiornamento Serie TV:* _{serie}_"
                 if rating: txt += f" (⭐ {rating}/10)"
                 txt += "\nNuovi episodi:"
-                for s in sorted(seasons):
-                    eps = sorted(seasons[s])
+                for se in sorted(added_eps):
+                    eps = sorted(added_eps[se])
                     if len(eps)==1:
-                        txt += f"\nS{s}E{eps[0]}"
+                        txt += f"\nS{se}E{eps[0]}"
                     else:
-                        nums = ", ".join(str(e) for e in eps)
-                        txt += f"\nStagione {s}: episodi {nums}"
+                        txt += f"\nStagione {se}: episodi {', '.join(str(e) for e in eps)}"
                 send_telegram(txt, photo_url=poster)
 
-    # ─── Aggiorna cache ───────────────────────────────────
-    # Manteniamo tutti i film e uniamo gli episodi vecchi/nuovi
-    cache_eps = {
-        (i.get('SeriesName'), i.get('ParentIndexNumber'), i.get('IndexNumber')): i
-        for i in old_episodes
-    }
-    for ep in new_episodes:
-        key = (ep.get('SeriesName'), ep.get('ParentIndexNumber'), ep.get('IndexNumber'))
-        cache_eps[key] = ep
+        # aggiorna cache
+        cache['episodes'].setdefault(serie, {})
+        for se, eps in seasons.items():
+            cache['episodes'][serie].setdefault(se, [])
+            cache['episodes'][serie][se] = sorted(
+                set(cache['episodes'][serie][se]) | eps
+            )
 
-    new_cache = new_movies + list(cache_eps.values())
-    save_cache(new_cache)
+    save_cache(cache)
 
 if __name__ == '__main__':
     process()
