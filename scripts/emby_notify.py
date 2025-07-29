@@ -43,7 +43,7 @@ def parse_resolutions(path):
 def get_tmdb_data(tmdb_id):
     # prova prima in italiano, poi in inglese
     base = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
-    for lang in ('it-IT','en-US'):
+    for lang in ('it-IT', 'en-US'):
         resp = requests.get(base, params={
             'api_key': TMDB_API_KEY,
             'language': lang
@@ -55,7 +55,6 @@ def get_tmdb_data(tmdb_id):
     return {}
 
 def get_trakt_info(tmdb_id):
-    # recupera slug e rating da Trakt usando l'ID TMDB
     url = f"https://api.trakt.tv/movies/{tmdb_id}"
     headers = {
         'Content-Type': 'application/json',
@@ -74,7 +73,6 @@ def main():
     bot   = Bot(token=TELEGRAM_BOT_TOKEN)
     cache = load_cache()
 
-    # prendi tutti i movie ordinati per DataCreated
     params = {
         'IncludeItemTypes': 'Movie',
         'Recursive': 'true',
@@ -87,7 +85,6 @@ def main():
     items   = requests.get(url, params=params, headers=headers, timeout=10).json().get('Items', [])
 
     for item in items:
-        # parse data creazione
         dt = parser.parse(item['DateCreated'])
         if dt < CUTOFF:
             break
@@ -97,33 +94,27 @@ def main():
             continue
         cache.add(item_id)
 
-        # estrai risoluzioni dal nome file
         path = item.get('Path','') or ''
         ress = parse_resolutions(path)
         res_str = ", ".join(ress) if ress else "Unknown"
 
-        # prendi l'ID TMDB da Emby
         tmdb_id = item.get('ProviderIds',{}).get('Tmdb')
         if not tmdb_id:
             continue
 
-        # info da TMDB
         tmdb = get_tmdb_data(tmdb_id)
         title = tmdb.get('title') or item.get('Name','')
         plot  = tmdb.get('overview','')
         poster_path = tmdb.get('poster_path')
         poster_url  = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
 
-        # anno
         release_date = tmdb.get('release_date','')
         year = release_date.split('-')[0] if release_date else ''
 
-        # info Trakt
         slug, rating = get_trakt_info(tmdb_id)
         trakt_url = f"https://trakt.tv/movies/{slug}" if slug else ''
         vote      = f"{rating:.1f}"
 
-        # costruisci messaggio in Markdown
         message = []
         message.append("Nuovo film")
         message.append("")  # linea vuota
@@ -138,7 +129,6 @@ def main():
 
         msg_text = "\n".join(message)
 
-        # invia poster+didascalia o solo testo
         if poster_url:
             bot.send_photo(
                 chat_id=TELEGRAM_CHAT_ID,
