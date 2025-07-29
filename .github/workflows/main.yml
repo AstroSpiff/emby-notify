@@ -1,53 +1,41 @@
-name: Emby Notify
+name: emby-notify
 
 on:
-  schedule:  # ogni 5 minuti
-    - cron: '*/5 * * * *'
+  schedule:
+    - cron: '*/15 * * * *'  # ogni 15′
   workflow_dispatch:
 
 jobs:
   notify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
     env:
-      EMBY_SERVER_URL:   ${{ secrets.EMBY_SERVER_URL }}
-      EMBY_API_KEY:      ${{ secrets.EMBY_API_KEY }}
-      TELEGRAM_BOT_TOKEN:${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-      TMDB_API_KEY:      ${{ secrets.TMDB_API_KEY }}
-      TRAKT_API_KEY:     ${{ secrets.TRAKT_API_KEY }}
+      EMBY_SERVER_URL:    ${{ secrets.EMBY_SERVER_URL }}
+      EMBY_API_KEY:       ${{ secrets.EMBY_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
+      TRAKT_API_KEY:      ${{ secrets.TRAKT_API_KEY }}
 
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests python-dateutil python-telegram-bot
+          pip install requests python-dateutil
 
-      - name: Mostra WORKSPACE e file
-        run: |
-          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-          ls -R .
-
-      - name: Restore Emby cache
-        uses: actions/cache@v3
-        with:
-          path: scripts/cache.json
-          key: ${{ runner.os }}-emby-cache
-
-      - name: Print cache.json
-        run: |
-          if [ -f scripts/cache.json ]; then cat scripts/cache.json; else echo "No cache yet"; fi
-
-      - name: Run Emby Notify script
+      - name: Run notifier
         run: python scripts/emby_notify.py
 
-      - name: Save Emby cache
-        uses: actions/cache@v3
-        with:
-          path: scripts/cache.json
-          key: ${{ runner.os }}-emby-cache
+      - name: Commit cache update
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/cache.json
+          git commit -m "Aggiornamento cache Emby" || echo "Nessun cambiamento"
+          git push
