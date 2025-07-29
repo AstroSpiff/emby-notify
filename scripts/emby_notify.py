@@ -2,254 +2,158 @@
 import os
 import json
 import re
-from datetime import datetime, timedelta
-
+import pathlib
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from datetime import datetime, timedelta, timezone
+from dateutil import parser
+from telegram import Bot
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
-EMBY_SERVER_URL    = os.environ['EMBY_SERVER_URL'].rstrip('/')
+# --- CONFIG DA ENV ---
+EMBY_SERVER_URL    = os.environ['EMBY_SERVER_URL']
 EMBY_API_KEY       = os.environ['EMBY_API_KEY']
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID   = os.environ['TELEGRAM_CHAT_ID']
 TMDB_API_KEY       = os.environ['TMDB_API_KEY']
 TRAKT_API_KEY      = os.environ['TRAKT_API_KEY']
 
-CACHE_FILE = 'data/cache.json'
-HEADERS    = {'Accept': 'application/json'}
+# --- FILTRO 24 ORE ---
+CUTOFF = datetime.now(timezone.utc) - timedelta(days=1)
 
-# timeout: (connect, read)
-TIMEOUT_EMBY  = (5, 30)
-TIMEOUT_OTHER = 10
+# --- PERCORSO CACHE ---
+CACHE_FILE = pathlib.Path(__file__).parent.parent / 'data' / 'cache.json'
 
-# ─── SESSION CON RETRY ───────────────────────────────────────────────────────────
-session = requests.Session()
-retries = Retry(
-    total=5,
-    backoff_factor=0.3,
-    status_forcelist=[500, 502, 503, 504],
-    allowed_methods=["GET", "POST"]
-)
-adapter = HTTPAdapter(max_retries=retries)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
-
-# ─── HELPERS ────────────────────────────────────────────────────────────────────
-
-def parse_emby_date(dt_str):
-    s = dt_str.rstrip('Z')
-    if '.' in s:
-        main, frac = s.split('.', 1)
-        frac = re.match(r'(\d{1,6})', frac).group(1)
-        s = f"{main}.{frac}"
-    return datetime.fromisoformat(s)
-
-def get_movie_info_tmdb(title):
-    """Restituisce (poster_url, trama) in italiano (fallback inglese)."""
+def load_cache():
     try:
-        # SEARCH in italiano
-        r = session.get(
-            'https://api.themoviedb.org/3/search/movie',
-            params={'api_key': TMDB_API_KEY, 'query': title, 'language': 'it-IT'},
-            headers=HEADERS,
-            timeout=TIMEOUT_OTHER
-        )
-        r.raise_for_status()
-        results = r.json().get('results', [])
-        if not results:
-            return None, None
-        movie = results[0]
+        return set(json.load(open(CACHE_FILE)))
+    except Exception:
+        return set()
 
-        # DETAILS in italiano
-        d = session.get(
-            f"https://api.themoviedb.org/3/movie/{movie['id']}",
-            params={'api_key': TMDB_API_KEY, 'language': 'it-IT'},
-            headers=HEADERS,
-            timeout=TIMEOUT_OTHER
-        )
-        d.raise_for_status()
-        details = d.json()
-        overview = details.get('overview') or ''
+def save_cache(cache_ids):
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(list(cache_ids), f)
 
-        # se mancante, ripiega su inglese
-        if not overview.strip():
-            e = session.get(
-                f"https://api.themoviedb.org/3/movie/{movie['id']}",
-                params={'api_key': TMDB_API_KEY, 'language': 'en-US'},
-                headers=HEADERS,
-                timeout=TIMEOUT_OTHER
-            )
-            e.raise_for_status()
-            overview = e.json().get('overview')
+def parse_resolutions(path):
+    # trova tutte le occorrenze tipo "720p", "1080p"...
+    found = re.findall(r'(\d{3,4}p)', path)
+    # uniche e ordinate per numero
+    uniq = sorted(set(found), key=lambda s: int(s[:-1]))
+    return uniq
 
-        poster = details.get('poster_path')
-        if poster:
-            poster = f"https://image.tmdb.org/t/p/w500{poster}"
-        return poster, overview
+def get_tmdb_data(tmdb_id):
+    # prova prima in italiano, poi in inglese
+    base = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+    for lang in ('it-IT','en-US'):
+        resp = requests.get(base, params={
+            'api_key': TMDB_API_KEY,
+            'language': lang
+        }, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('overview'):
+                return data
+    return {}
 
-    except Exception as e:
-        print(f"⚠️ Errore TMDb per '{title}': {e}")
-        return None, None
-
-def get_rating_trakt(title):
-    """Restituisce media voti Trakt (0–10) arrotondato a 1 decimale."""
+def get_trakt_info(tmdb_id):
+    # recupera slug e rating da Trakt usando l'ID TMDB
+    url = f"https://api.trakt.tv/movies/{tmdb_id}"
     headers = {
         'Content-Type': 'application/json',
         'trakt-api-version': '2',
         'trakt-api-key': TRAKT_API_KEY
     }
-    try:
-        # search movie → estrai slug
-        r = session.get(
-            'https://api.trakt.tv/search/movie',
-            params={'query': title, 'limit': 1},
-            headers=headers,
-            timeout=TIMEOUT_OTHER
-        )
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            return None
-        slug = data[0]['movie']['ids']['slug']
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        d = resp.json()
+        slug   = d.get('ids', {}).get('slug', '')
+        rating = d.get('rating', 0.0)
+        return slug, rating
+    return '', 0.0
 
-        # request rating
-        r2 = session.get(
-            f'https://api.trakt.tv/movies/{slug}/ratings',
-            headers=headers,
-            timeout=TIMEOUT_OTHER
-        )
-        r2.raise_for_status()
-        rating = r2.json().get('rating')
-        return round(rating, 1) if rating is not None else None
+def main():
+    bot   = Bot(token=TELEGRAM_BOT_TOKEN)
+    cache = load_cache()
 
-    except Exception as e:
-        print(f"⚠️ Errore Trakt per '{title}': {e}")
-        return None
+    # prendi tutti i movie ordinati per DataCreated
+    params = {
+        'IncludeItemTypes': 'Movie',
+        'Recursive': 'true',
+        'Fields': 'DateCreated,Path,ProviderIds',
+        'SortBy': 'DateCreated',
+        'SortOrder': 'Descending'
+    }
+    headers = {'X-Emby-Token': EMBY_API_KEY}
+    url     = f"{EMBY_SERVER_URL.rstrip('/')}/Items"
+    items   = requests.get(url, params=params, headers=headers, timeout=10).json().get('Items', [])
 
-def send_telegram(text, photo_url=None):
-    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
-    try:
-        if photo_url:
-            data = {
-                'chat_id': TELEGRAM_CHAT_ID,
-                'caption': text,
-                'parse_mode': 'Markdown'
-            }
-            resp = session.post(
-                base + 'sendPhoto',
-                params={'photo': photo_url},
-                data=data,
-                timeout=TIMEOUT_OTHER
-            )
-        else:
-            payload = {
-                'chat_id': TELEGRAM_CHAT_ID,
-                'text': text,
-                'parse_mode': 'Markdown'
-            }
-            resp = session.post(
-                base + 'sendMessage',
-                json=payload,
-                timeout=TIMEOUT_OTHER
-            )
-        if not resp.ok:
-            print(f"⚠️ Errore invio Telegram: {resp.status_code} {resp.text}")
-    except Exception as e:
-        print(f"⚠️ Exception invio Telegram: {e}")
+    for item in items:
+        # parse data creazione
+        dt = parser.parse(item['DateCreated'])
+        if dt < CUTOFF:
+            break
 
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, encoding='utf-8') as f:
-            return json.load(f)
-    return []
+        item_id = item['Id']
+        if item_id in cache:
+            continue
+        cache.add(item_id)
 
-def save_cache(items):
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+        # estrai risoluzioni dal nome file
+        path = item.get('Path','') or ''
+        ress = parse_resolutions(path)
+        res_str = ", ".join(ress) if ress else "Unknown"
 
-# ─── MAIN ───────────────────────────────────────────────────────────────────────
-
-def process():
-    old_items = load_cache()
-
-    # richiesta Emby (con Path incluso)
-    try:
-        resp = session.get(
-            f"{EMBY_SERVER_URL}/emby/Items",
-            params={
-                'api_key': EMBY_API_KEY,
-                'Recursive': True,
-                'IncludeItemTypes': 'Movie',
-                'Fields': 'MediaSources,DateCreated,Path'
-            },
-            headers=HEADERS,
-            timeout=TIMEOUT_EMBY
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"⚠️ Errore Emby: {e}")
-        return
-
-    all_items = data.get('Items', [])
-    now    = datetime.utcnow()
-    cutoff = now - timedelta(days=1)
-
-    def build_map(items):
-        m = {}
-        for i in items:
-            title = i.get('Name')
-            try:
-                dt = parse_emby_date(i['DateCreated'])
-            except Exception:
-                continue
-
-            # cerco risoluzione in Path (es. 720p, 1080p…)
-            path = i.get('Path', '')
-            match = re.search(r'(\d{3,4}p)', path)
-            if match:
-                res = match.group(1)
-            else:
-                vs   = i.get('MediaSources', [{}])[0].get('VideoStreams', [])
-                res  = f"{vs[0].get('Height')}p" if vs else 'Unknown'
-
-            m.setdefault(title, set()).add((res, dt))
-        return m
-
-    old_map = build_map(old_items)
-    new_map = build_map(all_items)
-
-    for title, infos in new_map.items():
-        recent = {r for (r, dt) in infos if dt >= cutoff}
-        if not recent:
+        # prendi l'ID TMDB da Emby
+        tmdb_id = item.get('ProviderIds',{}).get('Tmdb')
+        if not tmdb_id:
             continue
 
-        old_res = {r for (r, _) in old_map.get(title, set())}
-        poster, plot = get_movie_info_tmdb(title)
-        rating = get_rating_trakt(title)
+        # info da TMDB
+        tmdb = get_tmdb_data(tmdb_id)
+        title = tmdb.get('title') or item.get('Name','')
+        plot  = tmdb.get('overview','')
+        poster_path = tmdb.get('poster_path')
+        poster_url  = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
 
-        if title not in old_map:
-            txt = f"*Nuovo film:* _{title}_"
-            if rating is not None:
-                txt += f" (⭐ {rating}/10)"
-            txt += f"\nRisoluzioni: {', '.join(sorted(recent))}"
-            if plot:
-                txt += f"\n\n{plot}"
-            send_telegram(txt, photo_url=poster)
+        # anno
+        release_date = tmdb.get('release_date','')
+        year = release_date.split('-')[0] if release_date else ''
 
+        # info Trakt
+        slug, rating = get_trakt_info(tmdb_id)
+        trakt_url = f"https://trakt.tv/movies/{slug}" if slug else ''
+        vote      = f"{rating:.1f}"
+
+        # costruisci messaggio in Markdown
+        message = []
+        message.append("Nuovo film")
+        message.append("")  # linea vuota
+        message.append(f"*{title}* ({year})")
+        message.append("")  # linea vuota
+        message.append(f"Risoluzioni: {res_str}")
+        message.append("")  # linea vuota
+        message.append(plot)
+        message.append("")  # linea vuota
+        if trakt_url:
+            message.append(f"[Trakt]({trakt_url}) ⭐ *{vote}*")
+
+        msg_text = "\n".join(message)
+
+        # invia poster+didascalia o solo testo
+        if poster_url:
+            bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=poster_url,
+                caption=msg_text,
+                parse_mode='Markdown'
+            )
         else:
-            added = recent - old_res
-            if added:
-                txt = f"*Aggiornato:* _{title}_"
-                if rating is not None:
-                    txt += f" (⭐ {rating}/10)"
-                txt += f"\nNuove risoluzioni: {', '.join(sorted(added))}"
-                send_telegram(txt, photo_url=poster)
+            bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=msg_text,
+                parse_mode='Markdown'
+            )
 
-    save_cache(all_items)
-
+    save_cache(cache)
 
 if __name__ == '__main__':
-    process()
+    main()
