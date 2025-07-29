@@ -1,220 +1,164 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/emby_notify.py
 
 import os
 import re
 import json
+import asyncio
+import logging
+from pathlib import Path
+
 import requests
-from dateutil import parser
+from dateutil.parser import parse as parse_date
+from telegram import Bot
 
-# ─ CONFIG ─────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Configurazione logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
-EMBY_SERVER_URL   = os.environ['EMBY_SERVER_URL'].rstrip('/')
-EMBY_API_KEY      = os.environ['EMBY_API_KEY']
-TELEGRAM_BOT_TOKEN= os.environ['TELEGRAM_BOT_TOKEN']
-TELEGRAM_CHAT_ID  = os.environ['TELEGRAM_CHAT_ID']
-TMDB_API_KEY      = os.environ['TMDB_API_KEY']
-TRAKT_API_KEY     = os.environ['TRAKT_API_KEY']
+# ──────────────────────────────────────────────────────────────────────────────
+# Variabili d’ambiente
+EMBY_SERVER_URL    = os.environ['EMBY_SERVER_URL'].rstrip('/')
+EMBY_API_KEY       = os.environ['EMBY_API_KEY']
+TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
+TELEGRAM_CHAT_ID   = os.environ['TELEGRAM_CHAT_ID']
+TMDB_API_KEY       = os.environ['TMDB_API_KEY']
+TRAKT_API_KEY      = os.environ['TRAKT_API_KEY']
 
-# Dove salviamo gli ID già notificati
-STATE_FILE = os.path.join(os.path.dirname(__file__), 'processed.json')
+CACHE_PATH = Path(__file__).parent / "cache.json"
 
+# ──────────────────────────────────────────────────────────────────────────────
+def load_cache():
+    if CACHE_PATH.exists():
+        return set(json.loads(CACHE_PATH.read_text()))
+    return set()
 
-# ─ UTILITIES ──────────────────────────────────────────────────────────────────
+def save_cache(seen):
+    CACHE_PATH.write_text(json.dumps(list(seen), indent=2))
 
-def load_processed():
-    try:
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            return set(json.load(f))
-    except FileNotFoundError:
-        return set()
-
-def save_processed(ids):
-    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(list(ids), f)
-
+# ──────────────────────────────────────────────────────────────────────────────
 def get_emby_items():
-    """Recupera tutti i video da Emby."""
-    url = f"{EMBY_SERVER_URL}/emby/Items"
+    """Chiama Emby e restaura la lista di tutti i video (.strm)."""
+    url = f"{EMBY_SERVER_URL}/Items"
     params = {
-        'Recursive': 'true',
-        'IncludeItemTypes': 'Video',
-        'Fields': 'Path'
+        "Recursive": "true",
+        "IncludeItemTypes": "Video",
+        "Fields": "Path"
     }
-    headers = {'X-Emby-Token': EMBY_API_KEY}
+    headers = {"X-Emby-Token": EMBY_API_KEY}
     r = requests.get(url, params=params, headers=headers, timeout=10)
     r.raise_for_status()
-    return r.json().get('Items', [])
+    return [i for i in r.json().get("Items", []) if i.get("Path", "").endswith(".strm")]
 
-def parse_resolutions(path):
-    """Estrae risoluzioni dal path (es. 480p, 1080p, 2160p)."""
-    matches = re.findall(r'\b(\d{3,4}p)\b', path, flags=re.IGNORECASE)
-    unique = sorted(set(matches), key=lambda x: int(x.lower()[:-1]))
-    return unique
+def extract_resolutions(path):
+    """Dalla stringa del file estrae tutte le risoluzioni tipo '720p', '1080p'."""
+    name = os.path.basename(path)
+    res = re.findall(r"\b(\d{3,4}p)\b", name)
+    return sorted(set(res), key=lambda x: int(x.rstrip("p")))
 
-def get_tmdb_info(query):
-    """Cerca il film su TMDB, ritorna {id,title,year,overview}."""
-    # 1) SEARCH
-    url_s = 'https://api.themoviedb.org/3/search/movie'
-    params = {'api_key': TMDB_API_KEY, 'query': query}
-    r = requests.get(url_s, params=params, timeout=10); r.raise_for_status()
-    results = r.json().get('results', [])
-    if not results:
-        return None
-
-    movie = results[0]
-    movie_id = movie['id']
-    year = movie.get('release_date','')[:4]
-
-    # 2) DETAILS in italiano
-    url_d = f"https://api.themoviedb.org/3/movie/{movie_id}"
-    params_it = {'api_key': TMDB_API_KEY, 'language': 'it'}
-    r2 = requests.get(url_d, params=params_it, timeout=10); r2.raise_for_status()
-    det = r2.json()
-    overview = det.get('overview','').strip()
-
-    # fallback inglese
-    if not overview:
-        r3 = requests.get(url_d, params={'api_key': TMDB_API_KEY, 'language': 'en'}, timeout=10)
-        r3.raise_for_status()
-        overview = r3.json().get('overview','').strip()
-
-    return {
-        'id': movie_id,
-        'title': movie.get('title','').strip(),
-        'year': year,
-        'overview': overview
-    }
-
-def get_trakt_rating(tmdb_id, title, year):
-    """
-    Cerca su Trakt via TMDB id, ritorna (score, url_pagina).
-    Score in scala 1–10, una cifra decimale.
-    """
-    headers = {
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_API_KEY
-    }
-
-    # Provo lookup by tmdb
-    url_lookup = f"https://api.trakt.tv/search/tmdb/{tmdb_id}?type=movie"
-    r = requests.get(url_lookup, headers=headers, timeout=10); r.raise_for_status()
-    arr = r.json()
-
-    if not arr:
-        # fallback search generico
-        url_s = "https://api.trakt.tv/search/movie"
-        r2 = requests.get(url_s, headers=headers, params={'query': title, 'year': year}, timeout=10)
-        r2.raise_for_status()
-        arr = r2.json()
-        if not arr:
-            return None, None
-
-    # prendo il primo
-    trakt_obj = arr[0].get('movie') or arr[0]
-    slug = trakt_obj['ids']['slug']
-
-    # prendo il voto
-    url_r = f"https://api.trakt.tv/movies/{slug}/ratings"
-    r3 = requests.get(url_r, headers=headers, timeout=10); r3.raise_for_status()
-    rating_pct = r3.json().get('rating')  # es. 63.23 => 63%
-    if rating_pct is None:
-        return None, f"https://trakt.tv/movies/{slug}"
-
-    score = round(rating_pct/10, 1)  # 6.3
-    page = f"https://trakt.tv/movies/{slug}"
-    return score, page
-
-
-def send_telegram(cover_url, message):
-    """
-    Invia la copertina e il messaggio formattato a Telegram.
-    Usiamo direttamente le API Bot di Telegram via requests.
-    """
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    # scarico l'immagine in memoria
-    img_resp = requests.get(cover_url, headers={'X-Emby-Token': EMBY_API_KEY}, timeout=10)
-    img_resp.raise_for_status()
-
-    files = {
-        'photo': ('cover.jpg', img_resp.content)
-    }
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'caption': message,
-        'parse_mode': 'Markdown'
-    }
-    r = requests.post(api_url, data=data, files=files, timeout=10)
+# ──────────────────────────────────────────────────────────────────────────────
+def tmdb_search_movie(title):
+    """Cerco il film su TMDB e ritorno il primo risultato."""
+    url = "https://api.themoviedb.org/3/search/movie"
+    r = requests.get(url, params={"api_key": TMDB_API_KEY, "query": title}, timeout=10)
     r.raise_for_status()
+    results = r.json().get("results", [])
+    return results[0] if results else None
 
+def tmdb_get_details(movie_id, lang):
+    """Recupero i dettagli (overview, release_date, poster) in lingua specifica."""
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}"
+    r = requests.get(url, params={"api_key": TMDB_API_KEY, "language": lang}, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
-# ─ PROCESS ────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+def trakt_get_rating(tmdb_id):
+    """Recupera da Trakt il voto percentuale e costruisce URL e voto scala 1–10."""
+    url = f"https://api.trakt.tv/movies/{tmdb_id}"
+    headers = {
+        "Content-Type": "application/json",
+        "trakt-api-key": TRAKT_API_KEY,
+        "trakt-api-version": "2"
+    }
+    r = requests.get(url, headers=headers, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    percent = data.get("rating", 0.0)      # es. 66.3
+    vote10 = round(percent / 10.0, 1)     # es. 6.6
+    slug = data.get("ids", {}).get("slug")
+    link = f"https://trakt.tv/movies/{slug}" if slug else None
+    return vote10, link
 
+# ──────────────────────────────────────────────────────────────────────────────
+def build_message(title, year, resolutions, overview, trakt_vote, trakt_link):
+    res_line = "Risoluzioni: " + ", ".join(resolutions) if resolutions else ""
+    msg = (
+        f"**{title} ({year})**\n\n"
+        f"{res_line}\n\n"
+        f"{overview}\n\n"
+        f"[Trakt]({trakt_link}) ⭐ **{trakt_vote}**"
+    )
+    return msg
+
+# ──────────────────────────────────────────────────────────────────────────────
 def process():
-    processed = load_processed()
+    seen = load_cache()
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
     items = get_emby_items()
-    # solo quelli ancora non notificati
-    new_items = [i for i in items if i['Id'] not in processed]
-    if not new_items:
-        return None, None
+    new_items = [i for i in items if i["Id"] not in seen]
 
-    # ne prendo il primo
-    item = new_items[0]
-    processed.add(item['Id'])
-    save_processed(processed)
+    logging.info(f"Trovati {len(items)} strm, di cui {len(new_items)} nuovi")
 
-    path = item.get('Path','')
-    filename = os.path.splitext(os.path.basename(path))[0]
+    for item in new_items:
+        path = item["Path"]
+        resolutions = extract_resolutions(path)
 
-    # estraggo risoluzioni
-    resolutions = parse_resolutions(path)
+        # prendo il titolo base dal filename (senza estensione e resoluzioni)
+        base = os.path.splitext(os.path.basename(path))[0]
+        title = re.sub(r"\b\d{3,4}p\b", "", base).replace(".", " ").strip()
 
-    # prendo info TMDB
-    tmdb = get_tmdb_info(filename)
-    if tmdb:
-        title = tmdb['title']
-        year  = tmdb['year']
-        overview = tmdb['overview']
-    else:
-        title = filename
-        year  = ''
-        overview = ''
+        tmdb = tmdb_search_movie(title)
+        if not tmdb:
+            logging.warning(f"Nessun risultato TMDB per '{title}'")
+            seen.add(item["Id"])
+            continue
 
-    # rating su Trakt
-    score, trakt_url = (None, None)
-    if tmdb:
-        score, trakt_url = get_trakt_rating(tmdb['id'], title, year)
+        movie_id = tmdb["id"]
+        # preferisco italian, altrimenti english
+        det_it = tmdb_get_details(movie_id, "it-IT")
+        overview = det_it.get("overview") or tmdb_get_details(movie_id, "en-US").get("overview", "")
+        year = parse_date(det_it.get("release_date", "")).year if det_it.get("release_date") else ""
+        poster = det_it.get("poster_path")
+        cover_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
 
-    # compongo il messaggio in Markdown
-    lines = []
-    lines.append('*Nuovo film*')
-    lines.append('')
-    if year:
-        lines.append(f"**{title} ({year})**")
-    else:
-        lines.append(f"**{title}**")
-    lines.append('')
-    if resolutions:
-        lines.append(f"Risoluzioni: {', '.join(resolutions)}")
-        lines.append('')
-    if overview:
-        lines.append(overview)
-        lines.append('')
-    if score is not None and trakt_url:
-        lines.append(f"[Trakt]({trakt_url}) ⭐ **{score}**")
+        trak_vote, trak_link = trakt_get_rating(movie_id)
 
-    message = "\n".join(lines)
+        msg = build_message(title, year, resolutions, overview, trak_vote, trak_link)
 
-    # URL copertina primaria Emby
-    cover_url = f"{EMBY_SERVER_URL}/emby/Items/{item['Id']}/Images/Primary"
+        # invio a Telegram (async)
+        logging.info(f"Invio notifica per '{title}' ({year})")
+        asyncio.get_event_loop().run_until_complete(
+            bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=cover_url,
+                caption=msg,
+                parse_mode="Markdown"
+            )
+        )
 
-    return cover_url, message
+        seen.add(item["Id"])
 
+    save_cache(seen)
 
-# ─ MAIN ───────────────────────────────────────────────────────────────────────
-
-if __name__ == '__main__':
-    cover, msg = process()
-    if cover and msg:
-        send_telegram(cover, msg)
+# ──────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    try:
+        process()
+    except Exception as e:
+        logging.exception("Errore durante l’esecuzione")
+        raise
