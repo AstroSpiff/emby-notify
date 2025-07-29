@@ -1,205 +1,152 @@
 #!/usr/bin/env python3
 import os
 import json
-import requests
-from pathlib import Path
 from datetime import datetime, timedelta
+import requests
+import telegram
 
-# ————————————————
-# 📌 Variabili d’ambiente (da GitHub Secrets)
-# ————————————————
-EMBY_SERVER_URL    = os.getenv('EMBY_SERVER_URL')
-EMBY_API_KEY       = os.getenv('EMBY_API_KEY')
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID   = os.getenv('TELEGRAM_CHAT_ID')
-TRAKT_API_KEY      = os.getenv('TRAKT_API_KEY')
-OMDB_API_KEY       = os.getenv('OMDB_API_KEY')
-TMDB_API_KEY       = os.getenv('TMDB_API_KEY')
+# --- CONFIGURAZIONE DA ENV ---
+EMBY_SERVER_URL   = os.getenv("EMBY_SERVER_URL")
+EMBY_API_KEY      = os.getenv("EMBY_API_KEY")
+EMBY_USER_ID      = os.getenv("EMBY_USER_ID")      # assicurati di averlo a disposizione
+TELEGRAM_BOT_TOKEN= os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID")
+TMDB_API_KEY      = os.getenv("TMDB_API_KEY")
 
-# ————————————————
-# 📁 Cache file
-# ————————————————
-CACHE_PATH = Path('data/cache.json')
-CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+CACHE_PATH = "data/cache.json"
+
 
 def load_cache():
-    if CACHE_PATH.exists():
-        return json.loads(CACHE_PATH.read_text(encoding='utf-8'))
-    return {}
+    try:
+        with open(CACHE_PATH, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
 
 def save_cache(cache):
-    CACHE_PATH.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding='utf-8')
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    with open(CACHE_PATH, "w") as f:
+        json.dump(cache, f, indent=2)
 
-# ————————————————
-# 📆 Parser robusto per DateCreated
-# ————————————————
-def parse_date_created(date_str):
-    if not date_str:
-        return None
-    # rimuovi eventuale 'Z' finale
-    if date_str.endswith('Z'):
-        date_str = date_str[:-1]
-    # tronca le frazioni a 6 decimali
-    if '.' in date_str:
-        base, frac = date_str.split('.', 1)
-        frac = ''.join(ch for ch in frac if ch.isdigit())
-        frac = (frac + '000000')[:6]  # assicura almeno 6 cifre
-        date_str = f"{base}.{frac}"
-    try:
-        return datetime.fromisoformat(date_str)
-    except ValueError:
-        return None
 
-# ————————————————
-# 🎞️ Fetch Emby items con DateCreated
-# ————————————————
 def fetch_emby_items():
-    headers = {'X-Emby-Token': EMBY_API_KEY}
+    url = f"{EMBY_SERVER_URL}/emby/Users/{EMBY_USER_ID}/Items"
     params = {
-        'IncludeItemTypes': 'Movie,Episode',
-        'Fields': 'MediaSources,Overview,ProductionYear,Name,ParentIndexNumber,IndexNumber,SeriesName,PrimaryImageTag,DateCreated',
-        'Recursive': 'true',
-        'Limit': 100
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie",
+        "IsHidden": "false",
+        # chiediamo anche DateAdded e MediaSources
+        "Fields": "DateAdded,MediaSources"
     }
-    r = requests.get(f"{EMBY_SERVER_URL}/emby/Items", headers=headers, params=params)
+    headers = {"X-Emby-Token": EMBY_API_KEY}
+    r = requests.get(url, params=params, headers=headers)
     r.raise_for_status()
-    return r.json().get('Items', [])
+    return r.json().get("Items", [])
 
-# ————————————————
-# 🔑 Chiave unica: ItemId + MediaSourceId
-# ————————————————
-def build_key(item, src):
-    return f"{item['Id']}__{src['Id']}"
 
-# ————————————————
-# 🔊 Formatta audio
-# ————————————————
-def format_audio(ch):
-    if ch == 2: return '2.0'
-    if ch == 6: return '5.1'
-    if ch == 8: return '7.1'
-    return f"{max(ch-1,1)}.1"
-
-# ————————————————
-# ⭐️ Valutazioni (Trakt + OMDb)
-# ————————————————
-def get_ratings(title, year):
-    trakt, imdb = 'N/A','N/A'
-    try:
-        headers = {
-            'Content-Type':'application/json',
-            'trakt-api-version':'2',
-            'trakt-api-key':TRAKT_API_KEY
-        }
-        q = requests.utils.quote(title)
-        r = requests.get(f"https://api.trakt.tv/search/movie?query={q}&year={year}", headers=headers)
-        if r.ok and r.json():
-            trakt = r.json()[0].get('score','N/A')
-    except:
-        pass
-    try:
-        q = requests.utils.quote(title)
-        r = requests.get(f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={q}&y={year}")
-        data = r.json()
-        imdb = data.get('imdbRating','N/A')
-    except:
-        pass
-    return trakt, imdb
-
-# ————————————————
-# 🎥 TMDb: prendi poster + overview
-# ————————————————
-def get_tmdb_info(title, year, is_series, season=None, episode=None):
-    base = "https://api.themoviedb.org/3"
-    kind = "tv" if is_series else "movie"
-    params = {"api_key":TMDB_API_KEY, "query":title}
-    if not is_series:
-        params["year"] = year
-    r = requests.get(f"{base}/search/{kind}", params=params)
+def get_tmdb_info(title, year):
+    """Cerca il film su TMDB e restituisce (poster_url, overview)."""
+    search_url = "https://api.themoviedb.org/3/search/movie"
+    params = {
+        "api_key": TMDB_API_KEY,
+        "query": title,
+        "year": year or "",
+        "language": "it-IT"
+    }
+    r = requests.get(search_url, params=params)
     if not r.ok:
         return None, None
-    results = r.json().get("results") or []
-    if not results:
+    data = r.json().get("results") or []
+    if not data:
         return None, None
-    tmdb_id = results[0]["id"]
-    det = requests.get(f"{base}/{kind}/{tmdb_id}", params={"api_key":TMDB_API_KEY})
-    if not det.ok:
-        return None, None
-    data = det.json()
-    poster = data.get("poster_path")
-    overview = data.get("overview","")
+    m = data[0]
+    poster = m.get("poster_path")
     poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
+    overview = m.get("overview")
     return poster_url, overview
 
-# ————————————————
-# 📲 Invia Telegram (photo o testo)
-# ————————————————
-def send_telegram(photo_url, caption):
-    if photo_url:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-        files = {'photo': requests.get(photo_url).content}
-        r = requests.post(url, data=data, files=files)
-    else:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'parse_mode': 'HTML'}
-        r = requests.post(url, data=data)
-    if not r.ok:
-        print("Errore invio Telegram:", r.status_code, r.text)
 
-# ————————————————
-# 🔄 Processo: filtra ultime 24h, confronta cache, notifica
-# ————————————————
-def process():
+def main():
     cache = load_cache()
-    new_cache = {}
     cutoff = datetime.utcnow() - timedelta(hours=24)
 
-    for item in fetch_emby_items():
-        dt = parse_date_created(item.get('DateCreated'))
-        if not dt or dt < cutoff:
-            continue  # skip se più vecchio di 24h
+    new_movies = []
+    updated_movies = []
 
-        title = item.get('Name')
-        year  = item.get('ProductionYear','')
-        is_series = bool(item.get('SeriesName'))
-        season    = item.get('ParentIndexNumber')
-        episode   = item.get('IndexNumber')
+    items = fetch_emby_items()
+    for item in items:
+        item_id = item["Id"]
+        # Emby ti restituisce la data in ISO con 'Z'
+        date_added = item.get("DateAdded")
+        if not date_added:
+            continue
+        dt_added = datetime.fromisoformat(date_added.rstrip("Z"))
 
-        poster_tmdb, overview_tmdb = get_tmdb_info(title, year, is_series, season, episode)
-        overview = overview_tmdb or item.get('Overview','')[:400]
-        poster_url = poster_tmdb
+        # lista di ID dei media sources (una per risoluzione/versione)
+        media_sources = item.get("MediaSources", [])
+        src_ids = [src["Id"] for src in media_sources]
 
-        trakt, imdb = get_ratings(title, year)
+        if item_id not in cache:
+            # nuovo film
+            if dt_added > cutoff:
+                new_movies.append((item, media_sources))
+            # aggiungo comunque al cache
+            cache[item_id] = src_ids
+        else:
+            # già visto: controllo se ci sono nuove versioni
+            old_src = set(cache[item_id])
+            added = [s for s in media_sources if s["Id"] not in old_src]
+            if added:
+                updated_movies.append((item, added))
+                # aggiorno il cache
+                cache[item_id] = src_ids
 
-        for src in item.get('MediaSources', []):
-            key = build_key(item, src)
-            entry = {
-                'Name': title,
-                'Year': year,
-                'SourceId': src.get('Id'),
-                'Height': src.get('Height'),
-                'Channels': src.get('Channels'),
-                'BitRate': src.get('BitRate')
-            }
-            new_cache[key] = entry
-            if cache.get(key) == entry:
-                continue
+    save_cache(cache)
 
-            is_update = any(k.startswith(item['Id']+"__") for k in cache)
-            ra = f"{src.get('Height')}p ({format_audio(src.get('Channels',2))})"
+    # inizializzo Telegram
+    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
-            header = "<b>Aggiornamento</b>" if is_update else "<b>Nuovo</b>"
-            caption  = f"{header}\n🎬 <b>{title}</b> ({year})\n"
-            if is_series:
-                caption += f"Stagione {season}, Episodio {episode}\n"
-            caption += f"📽 Risoluzione: {ra}\n\n"
-            caption += f"📝 {overview}...\n\n"
-            caption += f"⭐ Trakt: {trakt}\n⭐ IMDb: {imdb}"
+    # notifichiamo i nuovi film
+    for item, media_sources in new_movies:
+        title = item.get("Name")
+        year  = item.get("ProductionYear")
+        poster_url, overview = get_tmdb_info(title, year)
 
-            send_telegram(poster_url, caption)
+        caption = f"🎬 *Nuovo film:* {title} ({year})"
+        if overview:
+            caption += f"\n\n_{overview}_"
 
-    save_cache(new_cache)
+        if poster_url:
+            bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=poster_url,
+                caption=caption,
+                parse_mode="Markdown"
+            )
+        else:
+            bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=caption,
+                parse_mode="Markdown"
+            )
 
-if __name__ == '__main__':
-    process()
+    # notifichiamo gli aggiornamenti di risoluzione
+    for item, added_sources in updated_movies:
+        title = item.get("Name")
+        year  = item.get("ProductionYear")
+        qualities = sorted({ f"{s.get('Width')}p" for s in added_sources })
+
+        text = (
+            f"🔄 *{title}* ({year})\n"
+            f"Nuove risoluzioni aggiunte: {', '.join(qualities)}"
+        )
+        bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="Markdown"
+        )
+
+
+if __name__ == "__main__":
+    main()
