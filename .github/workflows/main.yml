@@ -2,7 +2,7 @@ name: emby-notify
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # ogni 15′
+    - cron: '*/45 * * * *'  # ogni 15′
   workflow_dispatch:
 
 jobs:
