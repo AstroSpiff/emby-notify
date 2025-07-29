@@ -3,7 +3,7 @@ import requests
 import json
 from datetime import datetime
 from pathlib import Path
-
+# Forzare riattivazione
 # === Lettura variabili ambiente (da GitHub Secrets) ===
 EMBY_SERVER = os.getenv("EMBY_SERVER_URL")
 EMBY_API_KEY = os.getenv("EMBY_API_KEY")
