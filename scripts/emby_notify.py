@@ -91,16 +91,29 @@ def get_ratings(title, year):
 # 📲 Invia notifica Telegram con foto + caption HTML
 # ————————————————
 def send_telegram(photo_url, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'caption': caption,
-        'parse_mode': 'HTML'
-    }
-    files = {'photo': requests.get(photo_url).content} if photo_url else None
-    r = requests.post(url, data=data, files=files)
+    """
+    Se c'è un poster, manda sendPhoto, altrimenti sendMessage.
+    """
+    if photo_url:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'caption': caption,
+            'parse_mode': 'HTML'
+        }
+        files = {'photo': requests.get(photo_url).content}
+        r = requests.post(url, data=data, files=files)
+    else:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': caption,
+            'parse_mode': 'HTML'
+        }
+        r = requests.post(url, data=data)
+
     if not r.ok:
-        print("Errore invio Telegram:", r.text)
+        print("Errore invio Telegram:", r.status_code, r.text)
 
 # ————————————————
 # 🔄 Processo principale: confronta cache e raggruppa per film
