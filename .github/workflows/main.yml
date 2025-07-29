@@ -1,41 +1,31 @@
-name: emby-notify
+name: notify
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # ogni 15′
+    - cron: '0 * * * *'  # ogni ora
   workflow_dispatch:
 
 jobs:
   notify:
     runs-on: ubuntu-24.04
-
-    env:
-      EMBY_SERVER_URL:    ${{ secrets.EMBY_SERVER_URL }}
-      EMBY_API_KEY:       ${{ secrets.EMBY_API_KEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-      TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
-      TRAKT_API_KEY:      ${{ secrets.TRAKT_API_KEY }}
-
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          pip install requests python-dateutil
+          pip install requests python-dateutil python-telegram-bot
 
-      - name: Run notifier
+      - name: Run emby_notify
+        env:
+          EMBY_SERVER_URL: ${{ secrets.EMBY_SERVER_URL }}
+          EMBY_API_KEY:    ${{ secrets.EMBY_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
+          TRAKT_API_KEY:      ${{ secrets.TRAKT_API_KEY }}
         run: python scripts/emby_notify.py
-
-      - name: Commit cache update
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/cache.json
-          git commit -m "Aggiornamento cache Emby" || echo "Nessun cambiamento"
-          git push
