@@ -2,7 +2,7 @@ name: emby-notify
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # ogni 15 minuti (a piacere)
+    - cron: '*/15 * * * *'  # ogni 15′
   workflow_dispatch:
 
 jobs:
@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      EMBY_SERVER_URL: ${{ secrets.EMBY_SERVER_URL }}
-      EMBY_API_KEY:    ${{ secrets.EMBY_API_KEY }}
+      EMBY_SERVER_URL:    ${{ secrets.EMBY_SERVER_URL }}
+      EMBY_API_KEY:       ${{ secrets.EMBY_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
       TMDB_API_KEY:       ${{ secrets.TMDB_API_KEY }}
@@ -29,8 +29,7 @@ jobs:
           pip install requests python-dateutil
 
       - name: Run notifier
-        run: |
-          python scripts/emby_notify.py
+        run: python scripts/emby_notify.py
 
       - name: Commit cache update
         run: |
