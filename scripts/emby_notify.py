@@ -160,8 +160,17 @@ def send_telegram(text, photo_url=None):
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, encoding='utf-8') as f:
+                content = f.read()
+                if not content.strip():
+                    # file vuoto o solo whitespace
+                    return []
+                return json.loads(content)
+        except json.JSONDecodeError:
+            # cache corrotta: reinizializziamo in memoria
+            print("⚠️ Cache corrotta, la reinizializzo come vuota")
+            return []
     return []
 
 def save_cache(items):
@@ -249,7 +258,6 @@ def process():
                 send_telegram(txt, photo_url=poster)
 
     save_cache(all_items)
-
 
 if __name__ == '__main__':
     process()
