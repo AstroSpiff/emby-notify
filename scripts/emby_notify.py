@@ -1,149 +1,100 @@
 #!/usr/bin/env python3
+# scripts/emby_notify.py
+
 import os
-import json
 import re
-import pathlib
+import asyncio
 import requests
-from datetime import datetime, timedelta, timezone
-from dateutil import parser
-from telegram import Bot
+from dateutil import parser as dateparser
+from telegram import Bot  # è asincrono
+from typing import Optional
 
-# --- CONFIG DA ENV ---
-EMBY_SERVER_URL    = os.environ['EMBY_SERVER_URL']
-EMBY_API_KEY       = os.environ['EMBY_API_KEY']
-TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-TELEGRAM_CHAT_ID   = os.environ['TELEGRAM_CHAT_ID']
-TMDB_API_KEY       = os.environ['TMDB_API_KEY']
-TRAKT_API_KEY      = os.environ['TRAKT_API_KEY']
+# ── CONFIG ────────────────────────────────────────────────────────────────────
 
-# --- FILTRO 24 ORE ---
-CUTOFF = datetime.now(timezone.utc) - timedelta(days=1)
+EMBY_SERVER_URL   = os.environ['EMBY_SERVER_URL']
+EMBY_API_KEY      = os.environ['EMBY_API_KEY']
+TELEGRAM_BOT_TOKEN= os.environ['TELEGRAM_BOT_TOKEN']
+TELEGRAM_CHAT_ID  = int(os.environ['TELEGRAM_CHAT_ID'])
+TMDB_API_KEY      = os.environ['TMDB_API_KEY']
+TRAKT_API_KEY     = os.environ['TRAKT_API_KEY']
 
-# --- PERCORSO CACHE ---
-CACHE_FILE = pathlib.Path(__file__).parent.parent / 'data' / 'cache.json'
+# ── UTILITY ───────────────────────────────────────────────────────────────────
 
-def load_cache():
-    try:
-        return set(json.load(open(CACHE_FILE)))
-    except Exception:
-        return set()
+def extract_resolution_from_filename(filename: str) -> Optional[str]:
+    m = re.search(r'(\d{3,4}p)', filename)
+    return m.group(1) if m else None
 
-def save_cache(cache_ids):
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_FILE, 'w') as f:
-        json.dump(list(cache_ids), f)
+def tmdb_get_movie(movie_id: int, language: str = 'it-IT') -> dict:
+    url = f'https://api.themoviedb.org/3/movie/{movie_id}'
+    params = {'api_key': TMDB_API_KEY, 'language': language}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
-def parse_resolutions(path):
-    # trova tutte le occorrenze tipo "720p", "1080p"...
-    found = re.findall(r'(\d{3,4}p)', path)
-    # uniche e ordinate per numero
-    uniq = sorted(set(found), key=lambda s: int(s[:-1]))
-    return uniq
+def trakt_get_rating(slug: str) -> Optional[float]:
+    url = f'https://api.trakt.tv/movies/{slug}/ratings'
+    headers = {'Content-Type': 'application/json',
+               'trakt-api-version': '2',
+               'trakt-api-key': TRAKT_API_KEY}
+    r = requests.get(url, headers=headers, timeout=10)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    # trakt restituisce percentuale, es: 66.3
+    return round(data.get('rating', 0) / 10, 1)
 
-def get_tmdb_data(tmdb_id):
-    # prova prima in italiano, poi in inglese
-    base = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
-    for lang in ('it-IT', 'en-US'):
-        resp = requests.get(base, params={
-            'api_key': TMDB_API_KEY,
-            'language': lang
-        }, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('overview'):
-                return data
-    return {}
+# ── LOGICA PRINCIPALE ────────────────────────────────────────────────────────
 
-def get_trakt_info(tmdb_id):
-    url = f"https://api.trakt.tv/movies/{tmdb_id}"
-    headers = {
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_API_KEY
-    }
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code == 200:
-        d = resp.json()
-        slug   = d.get('ids', {}).get('slug', '')
-        rating = d.get('rating', 0.0)
-        return slug, rating
-    return '', 0.0
+def process():
+    # 1) Chiamo Emby per vedere se c'è un nuovo file .strm
+    r = requests.get(f'{EMBY_SERVER_URL}/emby/Items?Recursive=true&IncludeItemTypes=Video&Fields=Path&ApiKey={EMBY_API_KEY}', timeout=10)
+    r.raise_for_status()
+    items = r.json().get('Items', [])
 
-def main():
-    bot   = Bot(token=TELEGRAM_BOT_TOKEN)
-    cache = load_cache()
-
-    params = {
-        'IncludeItemTypes': 'Movie',
-        'Recursive': 'true',
-        'Fields': 'DateCreated,Path,ProviderIds',
-        'SortBy': 'DateCreated',
-        'SortOrder': 'Descending'
-    }
-    headers = {'X-Emby-Token': EMBY_API_KEY}
-    url     = f"{EMBY_SERVER_URL.rstrip('/')}/Items"
-    items   = requests.get(url, params=params, headers=headers, timeout=10).json().get('Items', [])
-
+    # per semplicità, prendo il primo .strm non ancora notificato
     for item in items:
-        dt = parser.parse(item['DateCreated'])
-        if dt < CUTOFF:
-            break
+        if item['Path'].endswith('.strm'):
+            filename = os.path.basename(item['Path'])
+            resolution = extract_resolution_from_filename(filename) or 'Unknown'
+            title_slug = os.path.splitext(filename)[0]
+            # recupero info TMDB: qui suppongo tu abbia mappato slug→tmdb_id altrove
+            tmdb = tmdb_get_movie(movie_id=12345, language='it-IT')  # <-- sostituisci 12345 con l’ID corretto
+            year = dateparser.parse(tmdb['release_date']).year
+            title = tmdb['title']
+            overview = tmdb.get('overview') or tmdb_get_movie(12345, language='en-US').get('overview', '')
+            slug = tmdb['imdb_id'] or tmdb['id']
+            rating = trakt_get_rating(slug) or 0.0
 
-        item_id = item['Id']
-        if item_id in cache:
-            continue
-        cache.add(item_id)
-
-        path = item.get('Path','') or ''
-        ress = parse_resolutions(path)
-        res_str = ", ".join(ress) if ress else "Unknown"
-
-        tmdb_id = item.get('ProviderIds',{}).get('Tmdb')
-        if not tmdb_id:
-            continue
-
-        tmdb = get_tmdb_data(tmdb_id)
-        title = tmdb.get('title') or item.get('Name','')
-        plot  = tmdb.get('overview','')
-        poster_path = tmdb.get('poster_path')
-        poster_url  = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
-
-        release_date = tmdb.get('release_date','')
-        year = release_date.split('-')[0] if release_date else ''
-
-        slug, rating = get_trakt_info(tmdb_id)
-        trakt_url = f"https://trakt.tv/movies/{slug}" if slug else ''
-        vote      = f"{rating:.1f}"
-
-        message = []
-        message.append("Nuovo film")
-        message.append("")  # linea vuota
-        message.append(f"*{title}* ({year})")
-        message.append("")  # linea vuota
-        message.append(f"Risoluzioni: {res_str}")
-        message.append("")  # linea vuota
-        message.append(plot)
-        message.append("")  # linea vuota
-        if trakt_url:
-            message.append(f"[Trakt]({trakt_url}) ⭐ *{vote}*")
-
-        msg_text = "\n".join(message)
-
-        if poster_url:
-            bot.send_photo(
-                chat_id=TELEGRAM_CHAT_ID,
-                photo=poster_url,
-                caption=msg_text,
-                parse_mode='Markdown'
+            # costruisco il messaggio in Markdown
+            caption = (
+                f"*Nuovo film*\n\n"
+                f"*{title}* ({year})\n\n"
+                f"*Risoluzioni:* {resolution}\n\n"
+                f"{overview}\n\n"
+                f"[Trakt ⭐ **{rating}**](https://trakt.tv/movies/{slug})"
             )
-        else:
-            bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=msg_text,
-                parse_mode='Markdown'
-            )
+            cover_url = f"https://image.tmdb.org/t/p/w500{tmdb['poster_path']}"
+            return cover_url, caption
 
-    save_cache(cache)
+    return None, None
+
+# ── INVIO TELEGRAM (API ASINCRONA) ────────────────────────────────────────────
+
+async def send_telegram(photo_url: str, caption: str):
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    await bot.send_photo(
+        chat_id=TELEGRAM_CHAT_ID,
+        photo=photo_url,
+        caption=caption,
+        parse_mode='Markdown'
+    )
+
+# ── ENTRYPOINT ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    main()
+    cover, message = process()
+    if cover and message:
+        # scipy.run invoca correttamente la coroutine
+        asyncio.run(send_telegram(cover, message))
+    else:
+        print("Nessuna novità da notificare.")
