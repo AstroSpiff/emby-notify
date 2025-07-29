@@ -1,1 +1,4 @@
-{"movies": {}, "episodes": {}}
+{
+  "movie_ids": [],
+  "episode_ids": []
+}
